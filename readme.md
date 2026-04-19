@@ -3,7 +3,8 @@ Link to Streamlit Web App: https://proteinanalyzer-tfdxptasphzhddkxctm3ed.stream
 How it works:
 Put all the protein sequences in a csv file, like so (take care to stick to this format, with "sequence" at the top, and the sequences afterwards):
 
-```sequence
+```
+sequence
 MPYEKHVEQTVVEKTEQGGSGGSYRHQTEAEAEKIRRELEKQGGGGSGGGGS
 RQGGGAPAGGNIGGGQPQGGWGQPQQPQGGNQFSGGAQSRPQ
 MKTQRDGHSLGRWSLVLLLLGLVMPLAIIAQVLSYKEAVL
