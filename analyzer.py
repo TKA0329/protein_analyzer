@@ -113,7 +113,7 @@ def find_seq_column(df):
 
 # ── UI ────────────────────────────────────────────────────────────────────────
 st.title("🧬 Protein property analyzer")
-st.caption("Upload a CSV with an amino acid sequence column — get physicochemical properties back instantly.")
+st.caption("Upload a CSV with an amino acid sequence column and get physicochemical properties back instantly.")
 
 st.divider()
 
