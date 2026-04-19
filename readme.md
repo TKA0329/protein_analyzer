@@ -1,14 +1,18 @@
+# Protein Properties Analyzer
 Link to Streamlit Web App: https://proteinanalyzer-tfdxptasphzhddkxctm3ed.streamlit.app/
 
-How it works:
-Put all the protein sequences in a csv file, like so (take care to stick to this format, with "sequence" at the top, and the sequences afterwards):
+## How it works
 
-```
+Put your protein sequences in a CSV file in the following format, with `sequence` as the header:
+
+```csv
 sequence
 MPYEKHVEQTVVEKTEQGGSGGSYRHQTEAEAEKIRRELEKQGGGGSGGGGS
 RQGGGAPAGGNIGGGQPQGGWGQPQQPQGGNQFSGGAQSRPQ
 MKTQRDGHSLGRWSLVLLLLGLVMPLAIIAQVLSYKEAVL
 ```
 
-Then upload it to the web app, and it should return a table with the properties for all sequences. This helps us process a large number of sequences at once. 
+Upload it to the web app and it will return a table with the following properties for each sequence: molecular weight, isoelectric point (pI), GRAVY score, aromaticity, instability index, net charge at pH 7, and secondary structure fractions.
+
+Useful for processing large numbers of sequences at once without having to submit them one by one to tools like ProtParam.
 
