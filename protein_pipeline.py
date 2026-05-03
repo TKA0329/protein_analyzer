@@ -6,6 +6,38 @@ from Bio.SeqUtils.ProtParam import ProteinAnalysis
 PKA = {"D": 3.9, "E": 4.1, "H": 6.0, "C": 8.3, "Y": 10.1, "K": 10.5, "R": 12.5, "Nterm": 8.0, "Cterm": 3.1}
 VALID_AA = "ACDEFGHIKLMNPQRSTVWY"
 
+# ── Conservative substitution groups ─────────────────────────────────────────
+# Amino acids grouped by physicochemical similarity.
+# Each AA maps to a list of valid conservative substitutes (excludes itself).
+CONSERVATIVE_GROUPS = {
+    # Small nonpolar / aliphatic
+    "G": ["A"],
+    "A": ["G", "V", "S"],
+    "V": ["A", "I", "L"],
+    "L": ["V", "I", "M"],
+    "I": ["V", "L", "M"],
+    "M": ["L", "I"],
+    # Aromatic
+    "F": ["Y", "W"],
+    "Y": ["F", "W", "H"],
+    "W": ["F", "Y"],
+    # Polar uncharged
+    "S": ["T", "A", "N"],
+    "T": ["S", "V", "N"],
+    "N": ["Q", "S", "D"],
+    "Q": ["N", "E", "K"],
+    # Charged positive
+    "K": ["R", "Q"],
+    "R": ["K", "H"],
+    "H": ["R", "K", "Y"],
+    # Charged negative
+    "D": ["E", "N"],
+    "E": ["D", "Q"],
+    # Special
+    "C": ["S", "A"],
+    "P": ["A", "G"],
+}
+
 
 def net_charge(seq, ph=7.0):
     c = 1.0 / (1.0 + 10 ** (ph - PKA["Nterm"]))
@@ -51,7 +83,6 @@ def parse_mutation_regions(text):
     regions = []
     if not str(text).strip():
         return regions
-
     parts = [p.strip() for p in str(text).split(",") if p.strip()]
     for p in parts:
         if "-" in p:
@@ -87,7 +118,9 @@ def parse_copy_count(value):
     return n
 
 
-def mutate_sequence(seq, regions):
+# ── Mode 1: random substitution (original behaviour) ─────────────────────────
+def mutate_sequence_random(seq, regions):
+    """Mutate positions in `regions` to any other valid amino acid at random."""
     clean = str(seq).strip().upper().replace(" ", "").replace("\n", "")
     bad = set(clean) - set(VALID_AA)
     if bad:
@@ -109,7 +142,48 @@ def mutate_sequence(seq, regions):
     return "".join(arr), len(changed_positions)
 
 
-def expand_rows_with_mutations(df, seq_col, region_col, copies_col, random_seed):
+# ── Mode 2: conservative substitution ────────────────────────────────────────
+def mutate_sequence_conservative(seq, regions):
+    """
+    Mutate positions in `regions` to a physicochemically similar amino acid.
+    Uses CONSERVATIVE_GROUPS — polars stay polar, nonpolars stay nonpolar, etc.
+    If no conservative substitute exists for a residue, it is left unchanged.
+    """
+    clean = str(seq).strip().upper().replace(" ", "").replace("\n", "")
+    bad = set(clean) - set(VALID_AA)
+    if bad:
+        raise ValueError(f"invalid chars: {bad}")
+    if not clean:
+        raise ValueError("empty sequence")
+
+    arr = list(clean)
+    changed_positions = []
+    skipped_positions = []   # positions where no conservative sub was available
+
+    for start, end in regions:
+        for pos in range(start, end + 1):
+            idx = pos - 1
+            if idx < 0 or idx >= len(arr):
+                continue
+            current = arr[idx]
+            choices = CONSERVATIVE_GROUPS.get(current, [])
+            if choices:
+                arr[idx] = random.choice(choices)
+                changed_positions.append(pos)
+            else:
+                skipped_positions.append(pos)
+
+    return "".join(arr), len(changed_positions), skipped_positions
+
+
+# ── Shared expansion logic ────────────────────────────────────────────────────
+def expand_rows_with_mutations(df, seq_col, region_col, copies_col,
+                               random_seed, mutation_mode="random"):
+    """
+    Expand each input row into `num_copies` mutated copies.
+
+    mutation_mode: "random" | "conservative"
+    """
     random.seed(int(random_seed))
     expanded_rows = []
     skipped_zero_copy_rows = 0
@@ -121,6 +195,7 @@ def expand_rows_with_mutations(df, seq_col, region_col, copies_col, random_seed)
 
         region_text = "" if pd.isna(raw_region) else str(raw_region).strip()
         row_error = ""
+
         try:
             regions = parse_mutation_regions(region_text)
         except ValueError as e:
@@ -144,21 +219,35 @@ def expand_rows_with_mutations(df, seq_col, region_col, copies_col, random_seed)
             new_row["requested_copies"] = num_copies
             new_row["original_sequence"] = str(raw_seq)
             new_row["mutation_regions"] = region_text
+            new_row["mutation_mode"] = mutation_mode
 
             if row_error:
                 new_row[seq_col] = str(raw_seq)
                 new_row["mutated_positions_count"] = 0
+                new_row["conservative_skipped"] = ""
                 new_row["mutation_error"] = row_error
             else:
                 try:
-                    mutated_seq, n_changed = mutate_sequence(raw_seq, regions)
+                    if mutation_mode == "conservative":
+                        mutated_seq, n_changed, skipped = mutate_sequence_conservative(
+                            raw_seq, regions
+                        )
+                        new_row["conservative_skipped"] = (
+                            ",".join(map(str, skipped)) if skipped else ""
+                        )
+                    else:
+                        mutated_seq, n_changed = mutate_sequence_random(raw_seq, regions)
+                        new_row["conservative_skipped"] = ""
+
                     new_row[seq_col] = mutated_seq
                     new_row["mutated_positions_count"] = n_changed
                     new_row["mutation_error"] = ""
                 except ValueError as e:
                     new_row[seq_col] = str(raw_seq)
                     new_row["mutated_positions_count"] = 0
+                    new_row["conservative_skipped"] = ""
                     new_row["mutation_error"] = str(e)
+
             expanded_rows.append(new_row)
 
     return pd.DataFrame(expanded_rows), skipped_zero_copy_rows

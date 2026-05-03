@@ -7,7 +7,11 @@ Run:     streamlit run analyzer.py
 import pandas as pd
 import streamlit as st
 
-from protein_pipeline import analyze_sequence, expand_rows_with_mutations
+from protein_pipeline import (
+    CONSERVATIVE_GROUPS,
+    analyze_sequence,
+    expand_rows_with_mutations,
+)
 from ui_constants import APP_CSS, EXPECTED_FORMAT_EXAMPLE
 
 
@@ -47,8 +51,35 @@ def resolve_required_columns(df):
 
 def render_mutation_controls():
     st.divider()
-    st.subheader("Row-wise random substitution module")
-    st.caption("Each row can have its own mutation region and number of random copies.")
+    st.subheader("Mutation settings")
+
+    # ── Mode selector ─────────────────────────────────────────────────────────
+    mode = st.radio(
+        "Substitution mode",
+        options=["Random", "Conservative"],
+        horizontal=True,
+        help=(
+            "**Random**: mutate each position to any other amino acid.\n\n"
+            "**Conservative**: swap each residue for one with similar physicochemical "
+            "properties (e.g. polar → polar, nonpolar → nonpolar, charged → charged)."
+        ),
+    )
+
+    if mode == "Conservative":
+        with st.expander("View conservative substitution groups"):
+            rows = []
+            for aa, subs in sorted(CONSERVATIVE_GROUPS.items()):
+                rows.append({"Residue": aa, "Conservative substitutes": ", ".join(subs)})
+            st.dataframe(
+                pd.DataFrame(rows),
+                use_container_width=True,
+                hide_index=True,
+            )
+        st.caption(
+            "Positions with no defined conservative substitute (unlikely with standard AA) "
+            "will be left unchanged and listed in the `conservative_skipped` output column."
+        )
+
     random_seed = st.number_input(
         "Random seed",
         min_value=0,
@@ -56,8 +87,8 @@ def render_mutation_controls():
         value=42,
         step=1,
     )
-    run_analysis = st.button("Generate row-wise random copies and analyze")
-    return random_seed, run_analysis
+    run_analysis = st.button("Generate copies and analyze")
+    return mode.lower(), random_seed, run_analysis
 
 
 def render_summary(results_df, total_count):
@@ -130,9 +161,9 @@ def main():
         return
     seq_col, region_col, copies_col = cols
 
-    random_seed, run_analysis = render_mutation_controls()
+    mutation_mode, random_seed, run_analysis = render_mutation_controls()
     if not run_analysis:
-        st.info("Set the CSV and click the button above to run mutation + analysis.")
+        st.info("Configure settings above and click **Generate copies and analyze**.")
         return
 
     working_df, skipped_zero_copy_rows = expand_rows_with_mutations(
@@ -141,7 +172,9 @@ def main():
         region_col=region_col,
         copies_col=copies_col,
         random_seed=random_seed,
+        mutation_mode=mutation_mode,
     )
+
     if working_df.empty:
         st.error("No sequences to analyze after expansion. Check `num_random_copies` values.")
         return
