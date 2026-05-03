@@ -26,6 +26,13 @@ Three substitution modes are available when generating sequence variants:
 **Random** — each position in the specified region is mutated to a randomly chosen amino acid (any of the 20 standard AAs except the original).
 
 **Conservative** — each position is swapped to a physicochemically similar amino acid only. Polars stay polar, nonpolars stay nonpolar, charged residues stay charged, etc. Based on standard conservative substitution groups.
+Note:
+In this programme, 
+* Cysteine (C) is paired with Serine (S) due to size, but Cysteine is unique because it forms disulphide bridges. If a Cysteine involved in a bridge mutates to Serine, it’s often functionally "non-conservative" because the bridge is lost.
+
+* Proline (P) is paired with Alanine and Glycine. While similar in size, Proline is a "helix-breaker" with a rigid ring. Replacing it often changes the physical backbone of the protein.However, it is included in this programme for informational purposes. 
+
+* Histidine (H) is paired with Arginine (R) and Tyrosine (Y). Histidine is tricky because its charge depends on the local pH, making it an AA that can act as either polar, charged, or aromatic.
 
 **Scan (single-position exhaustive)** — for each position in the region, every possible conservative substitute is generated as a separate variant, changing only that one position at a time. Useful for identifying which specific residue is driving a property change. The `num_copies` column is ignored in this mode.
 
