@@ -16,7 +16,22 @@ RQGGGAPAGGNIGGGQPQGGWGQPQQPQGGNQFSGGAQSRPQ,,1
 MKTQRDGHSLGRWSLVLLLLGLVMPLAIIAQVLSYKEAVL,10,8
 ```
 
-Upload it to the web app and click the mutation/analyze button. The app creates random substituted copies per row, then returns a table with properties for each generated sequence: molecular weight, isoelectric point (pI), GRAVY score, aromaticity, instability index, net charge at pH 7, and secondary structure fractions.
+Upload it to the web app and click the mutation/analyze button. The app uses three modes (random, conservative or scan) to create substituted copies per row, then returns a table with properties for each generated sequence: molecular weight, isoelectric point (pI), GRAVY score, aromaticity, instability index, net charge at pH 7, and secondary structure fractions.
+
+## Features
+
+### Mutation modes
+Three substitution modes are available when generating sequence variants:
+
+**Random** — each position in the specified region is mutated to a randomly chosen amino acid (any of the 20 standard AAs except the original).
+
+**Conservative** — each position is swapped to a physicochemically similar amino acid only. Polars stay polar, nonpolars stay nonpolar, charged residues stay charged, etc. Based on standard conservative substitution groups.
+
+**Scan (single-position exhaustive)** — for each position in the region, every possible conservative substitute is generated as a separate variant, changing only that one position at a time. Useful for identifying which specific residue is driving a property change. The `num_copies` column is ignored in this mode.
+
+### Combination counter
+An expandable panel shows the total number of possible unique variants for each sequence and region in your CSV, broken down per position. Updates based on whichever mutation mode is selected.
+
 
 Useful for processing large numbers of sequences at once without having to submit them one by one to tools like ProtParam.
 
