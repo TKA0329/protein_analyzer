@@ -63,7 +63,7 @@ def render_combo_counter(df, seq_col, region_col, mutation_mode):
     """Show the number of possible combinations for each row."""
     st.markdown("#### Possible combinations in your dataset")
     rows_info = []
-    for i, row in df.iterrows():
+    for i, (_, row) in enumerate(df.iterrows()):
         seq = str(row[seq_col]).strip().upper().replace(" ", "")
         region_text = "" if pd.isna(row[region_col]) else str(row[region_col]).strip()
         try:
