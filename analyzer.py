@@ -10,7 +10,11 @@ import streamlit as st
 from protein_pipeline import (
     CONSERVATIVE_GROUPS,
     analyze_sequence,
+    count_conservative_combos,
+    count_random_combos,
     expand_rows_with_mutations,
+    max_unique_conservative_variants,
+    parse_mutation_regions,
 )
 from ui_constants import APP_CSS, EXPECTED_FORMAT_EXAMPLE
 
@@ -28,7 +32,10 @@ def render_upload_panel():
     with col_hint:
         st.markdown("**Expected format**")
         st.code(EXPECTED_FORMAT_EXAMPLE, language="text")
-        st.caption("First column = sequence, second = mutation region (optional), third = copies to generate.")
+        st.caption(
+            "First column = sequence, second = mutation region (e.g. `5-7` or `3,6,10`), "
+            "third = number of copies (ignored in scan mode)."
+        )
     return uploaded
 
 
@@ -42,56 +49,103 @@ def read_input_df(uploaded):
 
 def resolve_required_columns(df):
     if df.shape[1] < 3:
-        st.error("CSV must contain at least 3 columns: sequence, mutation_region, num_random_copies.")
+        st.error("CSV must contain at least 3 columns: sequence, mutation_region, num_copies.")
         return None
     seq_col, region_col, copies_col = df.columns[:3]
-    st.success(f"Using columns: sequence=`{seq_col}`, mutation region=`{region_col}`, copies=`{copies_col}`")
+    st.success(
+        f"Using columns: sequence=`{seq_col}`, "
+        f"mutation region=`{region_col}`, copies=`{copies_col}`"
+    )
     return seq_col, region_col, copies_col
+
+
+def render_combo_counter(df, seq_col, region_col, mutation_mode):
+    """Show the number of possible combinations for each row."""
+    st.markdown("#### Possible combinations in your dataset")
+    rows_info = []
+    for i, row in df.iterrows():
+        seq = str(row[seq_col]).strip().upper().replace(" ", "")
+        region_text = "" if pd.isna(row[region_col]) else str(row[region_col]).strip()
+        try:
+            regions = parse_mutation_regions(region_text)
+            if mutation_mode in ("conservative", "scan"):
+                total, breakdown = count_conservative_combos(seq, regions)
+                per_pos = ", ".join(
+                    f"pos {p}: {aa}→[{','.join(subs)}] ({n} choices)"
+                    for p, aa, subs, n in breakdown
+                )
+            else:
+                total, n_pos = count_random_combos(seq, regions)
+                per_pos = f"{n_pos} positions × 20 AAs each"
+            rows_info.append({
+                "Row": i + 1,
+                "Sequence (truncated)": seq[:30] + ("…" if len(seq) > 30 else ""),
+                "Region": region_text,
+                "Total combinations": f"{total:,}",
+                "Breakdown": per_pos,
+            })
+        except Exception as e:
+            rows_info.append({
+                "Row": i + 1,
+                "Sequence (truncated)": seq[:30],
+                "Region": region_text,
+                "Total combinations": "error",
+                "Breakdown": str(e),
+            })
+
+    st.dataframe(pd.DataFrame(rows_info), use_container_width=True, hide_index=True)
+    st.caption(
+        "Conservative/scan combos count each position's substitute pool size + 1 (keeping original). "
+        "Random combos = 20^n_positions."
+    )
 
 
 def render_mutation_controls():
     st.divider()
     st.subheader("Mutation settings")
 
-    # ── Mode selector ─────────────────────────────────────────────────────────
     mode = st.radio(
         "Substitution mode",
-        options=["Random", "Conservative"],
+        options=["Random", "Conservative", "Scan (single-position exhaustive)"],
         horizontal=True,
         help=(
-            "**Random**: mutate each position to any other amino acid.\n\n"
-            "**Conservative**: swap each residue for one with similar physicochemical "
-            "properties (e.g. polar → polar, nonpolar → nonpolar, charged → charged)."
+            "**Random**: each position mutates to any other AA at random.\n\n"
+            "**Conservative**: each position swaps to a physicochemically similar AA "
+            "(polar→polar, nonpolar→nonpolar, etc.). Number of copies set per row.\n\n"
+            "**Scan**: for each position in the region, generate every possible "
+            "conservative substitute — one mutation at a time. "
+            "Ignores the copies column. Best for identifying which residue matters."
         ),
     )
 
-    if mode == "Conservative":
+    mode_key = "scan" if "Scan" in mode else mode.lower()
+
+    if mode_key in ("conservative", "scan"):
         with st.expander("View conservative substitution groups"):
-            rows = []
-            for aa, subs in sorted(CONSERVATIVE_GROUPS.items()):
-                rows.append({"Residue": aa, "Conservative substitutes": ", ".join(subs)})
-            st.dataframe(
-                pd.DataFrame(rows),
-                use_container_width=True,
-                hide_index=True,
-            )
-        st.caption(
-            "Positions with no defined conservative substitute (unlikely with standard AA) "
-            "will be left unchanged and listed in the `conservative_skipped` output column."
+            rows = [
+                {"Residue": aa, "Conservative substitutes": ", ".join(subs)}
+                for aa, subs in sorted(CONSERVATIVE_GROUPS.items())
+            ]
+            st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+
+    if mode_key == "scan":
+        st.info(
+            "Scan mode generates all single-position conservative variants. "
+            "Each output row differs from the original by exactly one residue. "
+            "The `copies` column in your CSV is ignored."
         )
 
     random_seed = st.number_input(
-        "Random seed",
-        min_value=0,
-        max_value=999999,
-        value=42,
-        step=1,
+        "Random seed (used in random/conservative modes)",
+        min_value=0, max_value=999999, value=42, step=1,
+        disabled=(mode_key == "scan"),
     )
-    run_analysis = st.button("Generate copies and analyze")
-    return mode.lower(), random_seed, run_analysis
+
+    run_analysis = st.button("Generate variants and analyze")
+    return mode_key, random_seed, run_analysis
 
 
-def render_summary(results_df, total_count):
+def render_summary(results_df, total_count, mutation_mode):
     n_ok = results_df["error"].eq("").sum()
     n_err = total_count - n_ok
     ok = results_df[results_df["error"] == ""]
@@ -104,7 +158,7 @@ def render_summary(results_df, total_count):
         return
 
     m1, m2, m3, m4, m5 = st.columns(5)
-    m1.metric("Sequences", n_ok)
+    m1.metric("Variants", n_ok)
     m2.metric("Avg MW", f"{ok['molecular_weight'].mean() / 1000:.1f} kDa")
     m3.metric("Avg GRAVY", f"{ok['gravy'].mean():.3f}")
     m4.metric("Avg pI", f"{ok['isoelectric_point'].mean():.2f}")
@@ -162,11 +216,16 @@ def main():
     seq_col, region_col, copies_col = cols
 
     mutation_mode, random_seed, run_analysis = render_mutation_controls()
+
+    # ── Combo counter (always shown once file is loaded) ──────────────────────
+    with st.expander("📊 How many combinations are possible for your sequences?", expanded=False):
+        render_combo_counter(df, seq_col, region_col, mutation_mode)
+
     if not run_analysis:
-        st.info("Configure settings above and click **Generate copies and analyze**.")
+        st.info("Configure settings above and click **Generate variants and analyze**.")
         return
 
-    working_df, skipped_zero_copy_rows = expand_rows_with_mutations(
+    working_df, skipped_zero_copy_rows, duplicate_warnings = expand_rows_with_mutations(
         df=df,
         seq_col=seq_col,
         region_col=region_col,
@@ -176,17 +235,41 @@ def main():
     )
 
     if working_df.empty:
-        st.error("No sequences to analyze after expansion. Check `num_random_copies` values.")
+        st.error("No sequences to analyze after expansion. Check your region and copies values.")
         return
     if skipped_zero_copy_rows:
-        st.warning(f"{skipped_zero_copy_rows} input row(s) were skipped because copy count was 0.")
+        st.warning(f"{skipped_zero_copy_rows} input row(s) skipped (copy count was 0).")
+
+    # ── Duplicate warnings ────────────────────────────────────────────────────
+    if duplicate_warnings:
+        for w in duplicate_warnings:
+            if w["mode"] == "random":
+                n_pos = len(w["per_position"])
+                st.warning(
+                    f"⚠️ Row {w['row']}: you requested **{w['requested']} copies** but only "
+                    f"**{w['max_unique']:,} unique** random variants exist "
+                    f"({n_pos} position{'s' if n_pos != 1 else ''} × 19 possible substitutes each). "
+                    f"The extra copies will be duplicates."
+                )
+            else:
+                pos_detail = ", ".join(
+                    f"pos {p} ({aa}: {n} substitute{'s' if n != 1 else ''})"
+                    for p, aa, n in w["per_position"]
+                )
+                st.warning(
+                    f"⚠️ Row {w['row']}: you requested **{w['requested']} copies** but only "
+                    f"**{w['max_unique']} unique** conservative variants exist for this region "
+                    f"({pos_detail}). "
+                    f"The extra copies will be duplicates."
+                )
 
     with st.spinner(f"Analyzing {len(working_df)} sequences…"):
         results = [analyze_sequence(s) for s in working_df[seq_col].astype(str)]
+
     results_df = pd.DataFrame(results)
     out_df = pd.concat([working_df.reset_index(drop=True), results_df], axis=1)
 
-    render_summary(results_df, len(working_df))
+    render_summary(results_df, len(working_df), mutation_mode)
     render_outputs(out_df)
 
 
