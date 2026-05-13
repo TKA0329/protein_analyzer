@@ -187,6 +187,105 @@ def count_random_combos(seq, regions):
     return 20 ** n_positions, n_positions
 
 
+def count_weighted_combos(seq, regions, weighted_map):
+    """
+    Returns (total_combos, per_position_breakdown) for weighted mode.
+    At each valid position:
+      choices = original residue + all weighted substitutes for that residue.
+    """
+    clean = str(seq).strip().upper().replace(" ", "").replace("\n", "")
+    total = 1
+    per_position = []
+    seen = set()
+    for start, end in regions:
+        for pos in range(start, end + 1):
+            if pos in seen:
+                continue
+            seen.add(pos)
+            idx = pos - 1
+            if idx < 0 or idx >= len(clean):
+                continue
+            aa = clean[idx]
+            n_choices = len(weighted_map.get(aa, {}))
+            if aa not in weighted_map.get(aa, {}):
+                n_choices += 1
+            per_position.append((pos, aa, n_choices))
+            total *= n_choices
+    return total, per_position
+
+
+def parse_weighted_substitutions_df(weights_df):
+    """
+    Parse substitution weights CSV into:
+      {FROM_AA: {TO_AA: probability, ...}, ...}
+
+    Supported formats:
+      1) Long format: columns from,to,weight (or source,target,probability etc)
+      2) Matrix format: first column = source AA, remaining AA columns = weights
+    """
+    if weights_df is None or weights_df.empty:
+        raise ValueError("weights CSV is empty")
+
+    col_map = {str(c).strip().lower(): c for c in weights_df.columns}
+    long_from_keys = ["from", "from_aa", "source", "src", "original"]
+    long_to_keys = ["to", "to_aa", "target", "dst", "new"]
+    long_w_keys = ["weight", "prob", "probability", "p"]
+
+    from_col = next((col_map[k] for k in long_from_keys if k in col_map), None)
+    to_col = next((col_map[k] for k in long_to_keys if k in col_map), None)
+    w_col = next((col_map[k] for k in long_w_keys if k in col_map), None)
+
+    weighted_map = {}
+    if from_col and to_col and w_col:
+        for _, row in weights_df.iterrows():
+            src = str(row[from_col]).strip().upper()
+            dst = str(row[to_col]).strip().upper()
+            if not src or src == "NAN" or not dst or dst == "NAN":
+                continue
+            if src not in VALID_AA or dst not in VALID_AA:
+                raise ValueError(f"Invalid amino acid in weights row: {src}->{dst}")
+            try:
+                w = float(row[w_col])
+            except Exception as e:
+                raise ValueError(f"Invalid weight for {src}->{dst}: {row[w_col]}") from e
+            if w < 0:
+                raise ValueError(f"Negative weight for {src}->{dst}")
+            if w == 0:
+                continue
+            weighted_map.setdefault(src, {})
+            weighted_map[src][dst] = weighted_map[src].get(dst, 0.0) + w
+    else:
+        # Matrix format: first column is source AA, remaining columns are to-AA.
+        src_col = weights_df.columns[0]
+        for _, row in weights_df.iterrows():
+            src = str(row[src_col]).strip().upper()
+            if not src or src == "NAN":
+                continue
+            if src not in VALID_AA:
+                raise ValueError(f"Invalid source amino acid in matrix: {src}")
+            for col in weights_df.columns[1:]:
+                dst = str(col).strip().upper()
+                if dst not in VALID_AA:
+                    continue
+                cell = row[col]
+                if pd.isna(cell) or str(cell).strip() == "":
+                    continue
+                try:
+                    w = float(cell)
+                except Exception as e:
+                    raise ValueError(f"Invalid matrix weight {src}->{dst}: {cell}") from e
+                if w < 0:
+                    raise ValueError(f"Negative matrix weight for {src}->{dst}")
+                if w == 0:
+                    continue
+                weighted_map.setdefault(src, {})
+                weighted_map[src][dst] = weighted_map[src].get(dst, 0.0) + w
+
+    if not weighted_map:
+        raise ValueError("No valid substitution weights found in CSV")
+    return weighted_map
+
+
 # ── Mode 1: random substitution ───────────────────────────────────────────────
 def mutate_sequence_random(seq, regions):
     clean = str(seq).strip().upper().replace(" ", "").replace("\n", "")
@@ -235,6 +334,36 @@ def mutate_sequence_conservative(seq, regions):
     return "".join(arr), len(changed_positions), skipped_positions
 
 
+def mutate_sequence_weighted(seq, regions, weighted_map):
+    clean = str(seq).strip().upper().replace(" ", "").replace("\n", "")
+    bad = set(clean) - set(VALID_AA)
+    if bad:
+        raise ValueError(f"invalid chars: {bad}")
+    if not clean:
+        raise ValueError("empty sequence")
+
+    arr = list(clean)
+    changed_positions = []
+    skipped_positions = []
+    for start, end in regions:
+        for pos in range(start, end + 1):
+            idx = pos - 1
+            if idx < 0 or idx >= len(arr):
+                continue
+            current = arr[idx]
+            subs = weighted_map.get(current, {})
+            if not subs:
+                skipped_positions.append(pos)
+                continue
+            choices = list(subs.keys())
+            weights = list(subs.values())
+            chosen = random.choices(choices, weights=weights, k=1)[0]
+            arr[idx] = chosen
+            if chosen != current:
+                changed_positions.append(pos)
+    return "".join(arr), len(changed_positions), skipped_positions
+
+
 # ── Mode 3: exhaustive single-position scanning ───────────────────────────────
 def scan_sequence_single_position(seq, regions):
     """
@@ -274,9 +403,9 @@ def scan_sequence_single_position(seq, regions):
 
 # ── Shared expansion logic ────────────────────────────────────────────────────
 def expand_rows_with_mutations(df, seq_col, region_col, copies_col,
-                               random_seed, mutation_mode="random"):
+                               random_seed, mutation_mode="random", weighted_map=None):
     """
-    mutation_mode: "random" | "conservative" | "scan"
+    mutation_mode: "random" | "conservative" | "scan" | "weighted"
     In scan mode, copies_col is ignored — all single-position variants are
     generated exhaustively.
 
@@ -347,7 +476,7 @@ def expand_rows_with_mutations(df, seq_col, region_col, copies_col,
                 expanded_rows.append(new_row)
             continue
 
-        # ── Random / conservative modes ───────────────────────────────────────
+        # ── Random / conservative / weighted modes ────────────────────────────
         try:
             num_copies = parse_copy_count(raw_copies)
         except ValueError as e:
@@ -358,7 +487,7 @@ def expand_rows_with_mutations(df, seq_col, region_col, copies_col,
             skipped_zero_copy_rows += 1
             continue
 
-        # ── Duplicate check for conservative and random modes ─────────────────
+        # ── Duplicate check for conservative/random/weighted modes ────────────
         if not row_error and regions:
             try:
                 if mutation_mode == "conservative":
@@ -381,6 +510,16 @@ def expand_rows_with_mutations(df, seq_col, region_col, copies_col,
                             "mode": "random",
                             "per_position": [(None, None, 19)] * n_positions,
                         })
+                elif mutation_mode == "weighted" and weighted_map is not None:
+                    max_unique, per_pos = count_weighted_combos(str(raw_seq), regions, weighted_map)
+                    if num_copies > max_unique:
+                        duplicate_warnings.append({
+                            "row": idx + 1,
+                            "requested": num_copies,
+                            "max_unique": max_unique,
+                            "mode": "weighted",
+                            "per_position": per_pos,
+                        })
             except Exception:
                 pass
 
@@ -402,6 +541,11 @@ def expand_rows_with_mutations(df, seq_col, region_col, copies_col,
                 try:
                     if mutation_mode == "conservative":
                         mutated_seq, n_changed, skipped = mutate_sequence_conservative(raw_seq, regions)
+                        new_row["conservative_skipped"] = ",".join(map(str, skipped)) if skipped else ""
+                    elif mutation_mode == "weighted":
+                        if weighted_map is None:
+                            raise ValueError("weighted substitution map is missing")
+                        mutated_seq, n_changed, skipped = mutate_sequence_weighted(raw_seq, regions, weighted_map)
                         new_row["conservative_skipped"] = ",".join(map(str, skipped)) if skipped else ""
                     else:
                         mutated_seq, n_changed = mutate_sequence_random(raw_seq, regions)

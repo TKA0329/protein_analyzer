@@ -16,12 +16,12 @@ RQGGGAPAGGNIGGGQPQGGWGQPQQPQGGNQFSGGAQSRPQ,,1
 MKTQRDGHSLGRWSLVLLLLGLVMPLAIIAQVLSYKEAVL,10,8
 ```
 
-Upload it to the web app and click the mutation/analyze button. The app uses three modes (random, conservative or scan) to create substituted copies per row, then returns a table with properties for each generated sequence: molecular weight, isoelectric point (pI), GRAVY score, aromaticity, instability index, net charge at pH 7, and secondary structure fractions.
+Upload it to the web app and click the mutation/analyze button. The app uses four modes (random, conservative, scan, weighted semi-random) to create substituted copies per row, then returns a table with properties for each generated sequence: molecular weight, isoelectric point (pI), GRAVY score, aromaticity, instability index, net charge at pH 7, and secondary structure fractions.
 
 ## Features
 
 ### Mutation modes
-Three substitution modes are available when generating sequence variants:
+Four substitution modes are available when generating sequence variants:
 
 **Random** — each position in the specified region is mutated to a randomly chosen amino acid (any of the 20 standard AAs except the original).
 
@@ -35,6 +35,24 @@ In this programme,
 * Histidine (H) is paired with Arginine (R) and Tyrosine (Y). Histidine is tricky because its charge depends on the local pH, making it an AA that can act as either polar, charged, or aromatic.
 
 **Scan (single-position exhaustive)** — for each position in the region, every possible conservative substitute is generated as a separate variant, changing only that one position at a time. Useful for identifying which specific residue is driving a property change. The `num_copies` column is ignored in this mode.
+
+**Weighted (semi-random)** — substitutions are sampled according to a second uploaded CSV that defines weights/probabilities (instead of uniform random choice).
+Accepted formats:
+
+```csv
+from,to,weight
+A,V,0.6
+A,S,0.3
+A,G,0.1
+R,K,0.7
+R,H,0.3
+```
+
+```csv
+from,A,V,S,G,K,H
+A,0,0.6,0.3,0.1,0,0
+R,0,0,0,0,0.7,0.3
+```
 
 ### Combination counter
 An expandable panel shows the total number of possible unique variants for each sequence and region in your CSV, broken down per position. Updates based on whichever mutation mode is selected.

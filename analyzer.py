@@ -12,8 +12,10 @@ from protein_pipeline import (
     analyze_sequence,
     count_conservative_combos,
     count_random_combos,
+    count_weighted_combos,
     expand_rows_with_mutations,
     max_unique_conservative_variants,
+    parse_weighted_substitutions_df,
     parse_mutation_regions,
 )
 from ui_constants import APP_CSS, EXPECTED_FORMAT_EXAMPLE
@@ -59,7 +61,7 @@ def resolve_required_columns(df):
     return seq_col, region_col, copies_col
 
 
-def render_combo_counter(df, seq_col, region_col, mutation_mode):
+def render_combo_counter(df, seq_col, region_col, mutation_mode, weighted_map=None):
     """Show the number of possible combinations for each row."""
     st.markdown("#### Possible combinations in your dataset")
     rows_info = []
@@ -74,6 +76,16 @@ def render_combo_counter(df, seq_col, region_col, mutation_mode):
                     f"pos {p}: {aa}→[{','.join(subs)}] ({n} choices)"
                     for p, aa, subs, n in breakdown
                 )
+            elif mutation_mode == "weighted":
+                if weighted_map is None:
+                    total = "n/a"
+                    per_pos = "Load weights CSV to compute weighted combinations"
+                else:
+                    total, breakdown = count_weighted_combos(seq, regions, weighted_map)
+                    per_pos = ", ".join(
+                        f"pos {p}: {aa} ({n} weighted choices incl original)"
+                        for p, aa, n in breakdown
+                    )
             else:
                 total, n_pos = count_random_combos(seq, regions)
                 per_pos = f"{n_pos} positions × 20 AAs each"
@@ -81,7 +93,7 @@ def render_combo_counter(df, seq_col, region_col, mutation_mode):
                 "Row": i + 1,
                 "Sequence (truncated)": seq[:30] + ("…" if len(seq) > 30 else ""),
                 "Region": region_text,
-                "Total combinations": f"{total:,}",
+                "Total combinations": f"{total:,}" if isinstance(total, int) else str(total),
                 "Breakdown": per_pos,
             })
         except Exception as e:
@@ -96,7 +108,7 @@ def render_combo_counter(df, seq_col, region_col, mutation_mode):
     st.dataframe(pd.DataFrame(rows_info), use_container_width=True, hide_index=True)
     st.caption(
         "Conservative/scan combos count each position's substitute pool size + 1 (keeping original). "
-        "Random combos = 20^n_positions."
+        "Random combos = 20^n_positions. Weighted combos use your uploaded weight table."
     )
 
 
@@ -106,7 +118,7 @@ def render_mutation_controls():
 
     mode = st.radio(
         "Substitution mode",
-        options=["Random", "Conservative", "Scan (single-position exhaustive)"],
+        options=["Random", "Conservative", "Scan (single-position exhaustive)", "Weighted (semi-random)"],
         horizontal=True,
         help=(
             "**Random**: each position mutates to any other AA at random.\n\n"
@@ -114,11 +126,18 @@ def render_mutation_controls():
             "(polar→polar, nonpolar→nonpolar, etc.). Number of copies set per row.\n\n"
             "**Scan**: for each position in the region, generate every possible "
             "conservative substitute — one mutation at a time. "
-            "Ignores the copies column. Best for identifying which residue matters."
+            "Ignores the copies column. Best for identifying which residue matters.\n\n"
+            "**Weighted (semi-random)**: substitutions are sampled from your uploaded "
+            "weights/probabilities table."
         ),
     )
 
-    mode_key = "scan" if "Scan" in mode else mode.lower()
+    if "Scan" in mode:
+        mode_key = "scan"
+    elif "Weighted" in mode:
+        mode_key = "weighted"
+    else:
+        mode_key = mode.lower()
 
     if mode_key in ("conservative", "scan"):
         with st.expander("View conservative substitution groups"):
@@ -135,14 +154,28 @@ def render_mutation_controls():
             "The `copies` column in your CSV is ignored."
         )
 
+    weights_uploaded = None
+    if mode_key == "weighted":
+        st.markdown("#### Weighted substitution table")
+        st.caption(
+            "Upload a CSV in either format:\n"
+            "1) long: `from,to,weight`\n"
+            "2) matrix: first column source AA, remaining AA columns as weights."
+        )
+        weights_uploaded = st.file_uploader(
+            "Upload weighted substitutions CSV",
+            type=["csv"],
+            key="weighted_subs_csv",
+        )
+
     random_seed = st.number_input(
-        "Random seed (used in random/conservative modes)",
+        "Random seed (used in random/conservative/weighted modes)",
         min_value=0, max_value=999999, value=42, step=1,
         disabled=(mode_key == "scan"),
     )
 
     run_analysis = st.button("Generate variants and analyze")
-    return mode_key, random_seed, run_analysis
+    return mode_key, random_seed, run_analysis, weights_uploaded
 
 
 def render_summary(results_df, total_count, mutation_mode):
@@ -215,15 +248,36 @@ def main():
         return
     seq_col, region_col, copies_col = cols
 
-    mutation_mode, random_seed, run_analysis = render_mutation_controls()
+    mutation_mode, random_seed, run_analysis, weights_uploaded = render_mutation_controls()
+
+    weighted_map = None
+    if mutation_mode == "weighted" and weights_uploaded:
+        try:
+            weights_df = pd.read_csv(weights_uploaded)
+            weighted_map = parse_weighted_substitutions_df(weights_df)
+        except Exception:
+            weighted_map = None
 
     # ── Combo counter (always shown once file is loaded) ──────────────────────
     with st.expander("📊 How many combinations are possible for your sequences?", expanded=False):
-        render_combo_counter(df, seq_col, region_col, mutation_mode)
+        render_combo_counter(df, seq_col, region_col, mutation_mode, weighted_map=weighted_map)
 
     if not run_analysis:
         st.info("Configure settings above and click **Generate variants and analyze**.")
         return
+
+    if mutation_mode == "weighted":
+        if not weights_uploaded:
+            st.error("Weighted mode requires a second CSV file with substitution weights.")
+            return
+        if weighted_map is None:
+            try:
+                weights_df = pd.read_csv(weights_uploaded)
+                weighted_map = parse_weighted_substitutions_df(weights_df)
+            except Exception as e:
+                st.error(f"Could not parse weighted substitution CSV: {e}")
+                return
+        st.success("Loaded weighted substitution table.")
 
     working_df, skipped_zero_copy_rows, duplicate_warnings = expand_rows_with_mutations(
         df=df,
@@ -232,6 +286,7 @@ def main():
         copies_col=copies_col,
         random_seed=random_seed,
         mutation_mode=mutation_mode,
+        weighted_map=weighted_map,
     )
 
     if working_df.empty:
@@ -249,6 +304,17 @@ def main():
                     f"⚠️ Row {w['row']}: you requested **{w['requested']} copies** but only "
                     f"**{w['max_unique']:,} unique** random variants exist "
                     f"({n_pos} position{'s' if n_pos != 1 else ''} × 19 possible substitutes each). "
+                    f"The extra copies will be duplicates."
+                )
+            elif w["mode"] == "weighted":
+                pos_detail = ", ".join(
+                    f"pos {p} ({aa}: {n} weighted choices incl original)"
+                    for p, aa, n in w["per_position"]
+                )
+                st.warning(
+                    f"⚠️ Row {w['row']}: you requested **{w['requested']} copies** but only "
+                    f"**{w['max_unique']} unique** weighted variants exist for this region "
+                    f"({pos_detail}). "
                     f"The extra copies will be duplicates."
                 )
             else:
